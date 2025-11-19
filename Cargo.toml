@@ -13,5 +13,4 @@ strip = false
 [dependencies]
 memchr = "2.7"
 memmap2 = "0.9"
-pretty-hex = "0.4"
 rustc-hash = "2.1"

@@ -1,9 +1,11 @@
 use core::f32;
 use memchr::memrchr;
-use rustc_hash::FxHashMap;
+use rustc_hash::FxHasher;
 use std::fmt::Display;
 use std::hash::Hash;
+use std::hash::Hasher;
 use std::hint::assert_unchecked;
+use std::mem::{MaybeUninit, transmute};
 use std::slice::from_raw_parts;
 use std::str::FromStr;
 use std::{
@@ -94,26 +96,6 @@ struct Entry {
 }
 
 impl Entry {
-    fn new(value: i32) -> Self {
-        Self {
-            count: 1,
-            min: value,
-            max: value,
-            sum: value,
-        }
-    }
-
-    fn add_value(&mut self, value: i32) {
-        self.count += 1;
-        self.sum += value;
-        if value < self.min {
-            self.min = value;
-        }
-        if value > self.max {
-            self.max = value;
-        }
-    }
-
     fn min(&self) -> f32 {
         self.min as f32 / 10.0
     }
@@ -122,6 +104,103 @@ impl Entry {
     }
     fn average(&self) -> f32 {
         (self.sum as f32 / self.count as f32) / 10.0
+    }
+}
+
+const VALUES_SIZE: usize = 16384;
+const VALUES_MASK: usize = VALUES_SIZE - 1;
+
+struct Values {
+    names: Box<[Name; VALUES_SIZE]>,
+    entries: Box<[Entry; VALUES_SIZE]>,
+}
+
+impl Values {
+    pub fn new() -> Self {
+        let mut names =
+            unsafe { Box::<[MaybeUninit<Name>; VALUES_SIZE]>::new_uninit().assume_init() };
+        let mut entries =
+            unsafe { Box::<[MaybeUninit<Entry>; VALUES_SIZE]>::new_uninit().assume_init() };
+
+        for name in names.iter_mut() {
+            name.write(Name {
+                ptr: std::ptr::null(),
+                len: 0,
+            });
+        }
+
+        for entry in entries.iter_mut() {
+            entry.write(Entry {
+                min: 1000,
+                max: -1000,
+                sum: 0,
+                count: 0,
+            });
+        }
+
+        Self {
+            names: unsafe { transmute(names) },
+            entries: unsafe { transmute(entries) },
+        }
+    }
+
+    pub fn insert_value(&mut self, name: Name, value: i32) {
+        let mut hasher = FxHasher::default();
+        name.hash(&mut hasher);
+        let mut hash = hasher.finish() as usize;
+        let entry = unsafe {
+            loop {
+                let index = hash & VALUES_MASK;
+                let pname = self.names.get_unchecked_mut(index);
+                if pname.ptr.is_null() {
+                    *pname = name;
+                    break self.entries.get_unchecked_mut(index);
+                }
+                if *pname == name {
+                    break self.entries.get_unchecked_mut(index);
+                }
+                hash = hash.wrapping_add(1);
+            }
+        };
+        entry.sum += value;
+        entry.count += 1;
+        if value > entry.max {
+            entry.max = value;
+        }
+        if value < entry.min {
+            entry.min = value;
+        }
+    }
+
+    pub fn merge_entry(&mut self, name: Name, other_entry: Entry) {
+        let mut hasher = FxHasher::default();
+        name.hash(&mut hasher);
+        let mut hash = hasher.finish() as usize;
+        let entry = unsafe {
+            loop {
+                let index = hash & VALUES_MASK;
+                let pname = self.names.get_unchecked_mut(index & VALUES_MASK);
+                if pname.ptr.is_null() {
+                    *pname = name;
+                    break self.entries.get_unchecked_mut(index);
+                }
+                if *pname == name {
+                    break self.entries.get_unchecked_mut(index);
+                }
+                hash = hash.wrapping_add(1);
+            }
+        };
+        entry.sum += other_entry.sum;
+        entry.count += other_entry.count;
+        entry.max = entry.max.max(other_entry.max);
+        entry.min = entry.min.min(other_entry.min);
+    }
+
+    pub fn into_iter(self) -> impl Iterator<Item = (Name, Entry)> {
+        self.names
+            .into_iter()
+            .zip(self.entries.into_iter())
+            .filter(|(name, _)| !name.ptr.is_null())
     }
 }
 
@@ -182,10 +261,8 @@ fn read_line(data: &[u8]) -> (&[u8], Name, &[u8]) {
     )
 }
 
-fn process_data_chunk(mut data: &[u8]) -> FxHashMap<Name, Entry> {
-    //eprintln!("processing {} bytes", data.len());
-
-    let mut entries = FxHashMap::default();
+fn process_data_chunk(mut data: &[u8]) -> Values {
+    let mut entries = Values::new();
 
     while data.len() > 32 {
         let name: Name;
@@ -193,26 +270,15 @@ fn process_data_chunk(mut data: &[u8]) -> FxHashMap<Name, Entry> {
         (data, name, value) = unsafe { read_line(data) };
 
         let value = parse_value(value);
-        entries
-            .entry(name)
-            .and_modify(|e: &mut Entry| e.add_value(value))
-            .or_insert(Entry::new(value));
+        entries.insert_value(name, value);
     }
 
     entries
 }
 
-fn merge_entries(entries1: &mut FxHashMap<Name, Entry>, entries2: FxHashMap<Name, Entry>) {
-    entries2.into_iter().for_each(|(name2, entry2)| {
-        entries1
-            .entry(name2)
-            .and_modify(|entry| {
-                entry.min = entry.min.min(entry2.min);
-                entry.max = entry.max.max(entry2.max);
-                entry.sum += entry2.sum;
-                entry.count += entry2.count;
-            })
-            .or_insert(entry2);
+fn merge_values(values1: &mut Values, values2: Values) {
+    values2.into_iter().for_each(|(name2, entry2)| {
+        values1.merge_entry(name2, entry2);
     });
 }
 
@@ -263,7 +329,7 @@ fn main() -> io::Result<()> {
         }
         let mut entries = process_data_chunk(data);
         for t in threads {
-            merge_entries(&mut entries, t.join().unwrap());
+            merge_values(&mut entries, t.join().unwrap());
         }
         entries
     });
