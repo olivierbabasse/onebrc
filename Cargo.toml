@@ -11,7 +11,7 @@ debug = true
 strip = false
 
 [dependencies]
-rustc-hash = "2.1"
-memmap2 = "0.9"
 memchr = "2.7"
+memmap2 = "0.9"
 pretty-hex = "0.4"
+rustc-hash = "2.1"

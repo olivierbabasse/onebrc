@@ -1,4 +1,5 @@
 use core::f32;
+use memchr::memrchr;
 use rustc_hash::FxHashMap;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -83,6 +84,8 @@ impl Display for Name {
     }
 }
 
+unsafe impl Send for Name {}
+
 struct Entry {
     count: u32,
     min: i32,
@@ -103,8 +106,6 @@ impl Entry {
     fn add_value(&mut self, value: i32) {
         self.count += 1;
         self.sum += value;
-        /*self.min = self.min.min(value);
-        self.max = self.max.max(value);*/
         if value < self.min {
             self.min = value;
         }
@@ -123,21 +124,6 @@ impl Entry {
         (self.sum as f32 / self.count as f32) / 10.0
     }
 }
-
-/*fn parse_value_internal(text: &[u8]) -> i32 {
-    if text[1] == b'.' {
-        (text[0] - b'0') as i32 * 10 + (text[2] - b'0') as i32
-    } else {
-        (text[0] - b'0') as i32 * 100 + (text[1] - b'0') as i32 * 10 + (text[3] - b'0') as i32
-    }
-}
-fn parse_value(text: &[u8]) -> i32 {
-    if text[0] == b'-' {
-        -parse_value_internal(&text[1..])
-    } else {
-        parse_value_internal(text)
-    }
-}*/
 
 fn parse_value(mut text: &[u8]) -> i32 {
     unsafe {
@@ -161,7 +147,6 @@ fn parse_value(mut text: &[u8]) -> i32 {
 #[cfg(not(target_feature = "avx2"))]
 fn read_line(mut data: &[u8]) -> (&[u8], Name, &[u8]) {
     use memchr::memchr;
-
     let name: &[u8];
     let value: &[u8];
     (name, data) = data.split_at(memchr(b';', &data[3..]).unwrap() + 3);
@@ -197,6 +182,40 @@ fn read_line(data: &[u8]) -> (&[u8], Name, &[u8]) {
     )
 }
 
+fn process_data_chunk(mut data: &[u8]) -> FxHashMap<Name, Entry> {
+    //eprintln!("processing {} bytes", data.len());
+
+    let mut entries = FxHashMap::default();
+
+    while data.len() > 32 {
+        let name: Name;
+        let value: &[u8];
+        (data, name, value) = unsafe { read_line(data) };
+
+        let value = parse_value(value);
+        entries
+            .entry(name)
+            .and_modify(|e: &mut Entry| e.add_value(value))
+            .or_insert(Entry::new(value));
+    }
+
+    entries
+}
+
+fn merge_entries(entries1: &mut FxHashMap<Name, Entry>, entries2: FxHashMap<Name, Entry>) {
+    entries2.into_iter().for_each(|(name2, entry2)| {
+        entries1
+            .entry(name2)
+            .and_modify(|entry| {
+                entry.min = entry.min.min(entry2.min);
+                entry.max = entry.max.max(entry2.max);
+                entry.sum += entry2.sum;
+                entry.count += entry2.count;
+            })
+            .or_insert(entry2);
+    });
+}
+
 fn main() -> io::Result<()> {
     let base = args()
         .nth(1)
@@ -228,20 +247,26 @@ fn main() -> io::Result<()> {
         data
     };
 
-    let mut entries = FxHashMap::default();
-
     let mut data = &*data;
-    while data.len() > 32 {
-        let name: Name;
-        let value: &[u8];
-        (data, name, value) = unsafe { read_line(data) };
 
-        let value = parse_value(value);
+    let thread_count = std::thread::available_parallelism()?.get();
+    let chunk_size = data.len() / thread_count;
+    eprintln!("using {thread_count} threads, chunk size = {chunk_size}");
+
+    let entries = std::thread::scope(|scope| {
+        let mut threads = Vec::new();
+        for _ in 0..thread_count - 1 {
+            let chunk_end = memrchr(b'\n', &data[..chunk_size]).unwrap();
+            let chunk = &data[..chunk_end + 33];
+            data = &data[chunk_end + 1..];
+            threads.push(scope.spawn(|| process_data_chunk(chunk)));
+        }
+        let mut entries = process_data_chunk(data);
+        for t in threads {
+            merge_entries(&mut entries, t.join().unwrap());
+        }
         entries
-            .entry(name)
-            .and_modify(|e: &mut Entry| e.add_value(value))
-            .or_insert(Entry::new(value));
-    }
+    });
 
     let mut entries = entries.into_iter().collect::<Vec<_>>();
     entries.sort_unstable_by(|e1, e2| e1.0.cmp(&e2.0));

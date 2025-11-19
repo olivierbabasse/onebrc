@@ -17,3 +17,4 @@ line splitting using avx2 : 15.346s
 name comparison using avx2 : 11.656s
 almost branchless value parser : 9.225s
 adding predictable branches to value update : 8.539s
+large chunks and std::thread (8 threads) : 1.367s
