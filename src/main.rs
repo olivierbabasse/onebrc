@@ -2,6 +2,7 @@ use core::f32;
 use rustc_hash::FxHashMap;
 use std::fmt::Display;
 use std::hash::Hash;
+use std::hint::assert_unchecked;
 use std::slice::from_raw_parts;
 use std::str::FromStr;
 use std::{
@@ -102,8 +103,14 @@ impl Entry {
     fn add_value(&mut self, value: i32) {
         self.count += 1;
         self.sum += value;
-        self.min = self.min.min(value);
-        self.max = self.max.max(value);
+        /*self.min = self.min.min(value);
+        self.max = self.max.max(value);*/
+        if value < self.min {
+            self.min = value;
+        }
+        if value > self.max {
+            self.max = value;
+        }
     }
 
     fn min(&self) -> f32 {
@@ -117,7 +124,7 @@ impl Entry {
     }
 }
 
-fn parse_value_internal(text: &[u8]) -> i32 {
+/*fn parse_value_internal(text: &[u8]) -> i32 {
     if text[1] == b'.' {
         (text[0] - b'0') as i32 * 10 + (text[2] - b'0') as i32
     } else {
@@ -130,6 +137,25 @@ fn parse_value(text: &[u8]) -> i32 {
     } else {
         parse_value_internal(text)
     }
+}*/
+
+fn parse_value(mut text: &[u8]) -> i32 {
+    unsafe {
+        assert_unchecked(text.len() >= 3);
+    }
+    let negative = text[0] == b'-';
+    if negative {
+        text = &text[1..];
+    }
+
+    unsafe {
+        assert_unchecked(text.len() >= 3);
+    }
+    let tens = [b'0', text[0]][(text.len() > 3) as usize] as i32;
+    let ones = (text[text.len() - 3]) as i32;
+    let tenths = (text[text.len() - 1]) as i32;
+    let abs_val = tens * 100 + ones * 10 + tenths - 111 * b'0' as i32;
+    if negative { -abs_val } else { abs_val }
 }
 
 #[cfg(not(target_feature = "avx2"))]
