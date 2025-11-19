@@ -14,3 +14,4 @@ strip = false
 rustc-hash = "2.1"
 memmap2 = "0.9"
 memchr = "2.7"
+pretty-hex = "0.4"

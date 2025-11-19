@@ -14,3 +14,4 @@ using memchr() instead of position() : 22.198s
 using references instead of copying names from buffer : 20.279s
 madvise, small line split optimizations : 17.773s
 line splitting using avx2 : 15.346s
+name comparison using avx2 : 11.656s
