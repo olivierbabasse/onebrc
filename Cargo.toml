@@ -1,0 +1,16 @@
+[package]
+name = "onebrc"
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+debug = true
+strip = false
+
+[dependencies]
+rustc-hash = "2.1"
+memmap2 = "0.9"
+memchr = "2.7"
