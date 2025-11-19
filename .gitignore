@@ -1,1 +1,5 @@
 /target
+/data
+/Cargo.lock
+/flamegraph.svg
+/results.txt
