@@ -1,8 +1,8 @@
 use core::f32;
-use memchr::memchr;
-use memmap2::{Advice, Mmap};
+use memmap2::{Advice, Mmap, MmapOptions};
 use rustc_hash::FxHashMap;
 use std::hash::Hash;
+use std::io::Read;
 use std::{
     env::args,
     fs::File,
@@ -16,8 +16,16 @@ struct Name<'a>(&'a [u8]);
 
 impl<'a> Hash for Name<'a> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        let ptr = self.0.as_ptr() as *const u32;
-        unsafe { ptr.read_unaligned() }.hash(state);
+        if self.0.len() < 4 {
+            let mut num = 0u64;
+            for c in &self.0[..8.min(self.0.len())] {
+                num = (num << 8) + *c as u64;
+            }
+            num.hash(state);
+        } else {
+            let ptr = self.0.as_ptr() as *const u32;
+            unsafe { ptr.read_unaligned() }.hash(state);
+        }
     }
 }
 
@@ -78,7 +86,10 @@ fn parse_value(text: &[u8]) -> i32 {
     }
 }
 
+#[cfg(not(target_feature = "avx2"))]
 fn read_line(mut data: &[u8]) -> (&[u8], &[u8], &[u8]) {
+    use memchr::memchr;
+
     let name: &[u8];
     let value: &[u8];
     (name, data) = data.split_at(memchr(b';', &data[3..]).unwrap() + 3);
@@ -86,6 +97,26 @@ fn read_line(mut data: &[u8]) -> (&[u8], &[u8], &[u8]) {
     (value, data) = data.split_at(memchr(b'\n', &data[3..]).unwrap() + 3);
     data = &data[1..];
     (data, name, value)
+}
+
+#[cfg(target_feature = "avx2")]
+#[target_feature(enable = "avx2")]
+fn read_line(data: &[u8]) -> (&[u8], &[u8], &[u8]) {
+    use std::arch::x86_64::{
+        __m256i, _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_set1_epi8,
+    };
+
+    let separator = _mm256_set1_epi8(b';' as i8);
+    let eol = _mm256_set1_epi8(b'\n' as i8);
+    let line = unsafe { _mm256_loadu_si256(data.as_ptr() as *const __m256i) };
+    let separator_pos =
+        _mm256_movemask_epi8(_mm256_cmpeq_epi8(line, separator)).trailing_zeros() as usize;
+    let eol_pos = _mm256_movemask_epi8(_mm256_cmpeq_epi8(line, eol)).trailing_zeros() as usize;
+    (
+        &data[eol_pos + 1..],
+        &data[..separator_pos],
+        &data[separator_pos + 1..eol_pos],
+    )
 }
 
 fn main() -> io::Result<()> {
@@ -97,9 +128,23 @@ fn main() -> io::Result<()> {
 
     let start_time = Instant::now();
 
-    let file = File::open(filename)?;
-    let data = unsafe { Mmap::map(&file)? };
-    data.advise(Advice::Sequential)?;
+    #[allow(unused_mut)]
+    let mut file = File::open(filename)?;
+    let file_length = file.metadata()?.len() as usize;
+    eprintln!("input file length : {file_length} bytes");
+
+    #[cfg(not(miri))]
+    let data = {
+        let data = unsafe { MmapOptions::new().len(file_length).map(&file)? };
+        data.advise(Advice::Sequential)?;
+        data
+    };
+    #[cfg(miri)]
+    let data = {
+        let mut data: Vec<u8> = Vec::with_capacity(file_length);
+        file.read_to_end(&mut data)?;
+        data
+    };
 
     let mut entries = FxHashMap::default();
 
@@ -107,7 +152,7 @@ fn main() -> io::Result<()> {
     while buf.len() >= 32 {
         let name: &[u8];
         let value: &[u8];
-        (buf, name, value) = read_line(buf);
+        (buf, name, value) = unsafe { read_line(buf) };
 
         let value = parse_value(value);
         entries
@@ -140,14 +185,17 @@ fn main() -> io::Result<()> {
     writer.flush()?;
     drop(writer);
 
-    match Command::new("cmp")
-        .arg(output)
-        .arg("./results.txt")
-        .status()?
-        .code()
+    #[cfg(not(miri))]
     {
-        Some(0) => eprintln!("results match expected output"),
-        _ => eprintln!("*** ERROR : results do not match expected output"),
+        match Command::new("cmp")
+            .arg(output)
+            .arg("./results.txt")
+            .status()?
+            .code()
+        {
+            Some(0) => eprintln!("results match expected output"),
+            _ => eprintln!("*** ERROR : results do not match expected output"),
+        }
     }
 
     Ok(())
